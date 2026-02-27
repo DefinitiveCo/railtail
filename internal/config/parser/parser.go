@@ -8,6 +8,41 @@ import (
 	"strings"
 )
 
+// StringSliceFlag implements flag.Value for repeatable string flags.
+type StringSliceFlag []string
+
+func (f *StringSliceFlag) String() string {
+	return strings.Join(*f, ",")
+}
+
+func (f *StringSliceFlag) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
+
+// TargetFlag holds values from repeatable -target flags.
+var TargetFlag StringSliceFlag
+
+func init() {
+	flag.Var(&TargetFlag, "target", "target in format listenPort=targetAddr (repeatable)")
+}
+
+// ParseTargetsEnv parses the TARGETS environment variable (comma-separated).
+func ParseTargetsEnv() []string {
+	val := os.Getenv("TARGETS")
+	if val == "" {
+		return nil
+	}
+	var result []string
+	for _, p := range strings.Split(val, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
 // ParseFlags parses the flags and returns a map of the flags and their values
 func ParseFlags(cfg any, t ...reflect.Type) map[string]*string {
 	flags := make(map[string]*string)
