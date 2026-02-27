@@ -124,15 +124,24 @@ func LoadConfig() (*Config, []error) {
 	hasNewConfig := len(targetSpecs) > 0
 	hasLegacyConfig := cfg.ListenPort != "" || cfg.TargetAddr != ""
 
-	if hasNewConfig && hasLegacyConfig {
-		return nil, []error{fmt.Errorf("cannot use both TARGETS/-target and LISTEN_PORT/TARGET_ADDR; use one or the other")}
-	}
-
 	if !hasNewConfig && !hasLegacyConfig {
 		return nil, []error{fmt.Errorf("target configuration required: set TARGETS env or use -target flags, or set LISTEN_PORT + TARGET_ADDR")}
 	}
 
-	if hasLegacyConfig {
+	if hasNewConfig {
+		var errs []error
+		for _, spec := range targetSpecs {
+			target, parseErrs := parseTargetMapping(spec)
+			if len(parseErrs) > 0 {
+				errs = append(errs, parseErrs...)
+				continue
+			}
+			cfg.Targets = append(cfg.Targets, target)
+		}
+		if len(errs) > 0 {
+			return nil, errs
+		}
+	} else if hasLegacyConfig {
 		if cfg.ListenPort == "" {
 			return nil, []error{fmt.Errorf("LISTEN_PORT is required when using legacy config: set LISTEN_PORT in env or use --listen-port")}
 		}
@@ -150,19 +159,6 @@ func LoadConfig() (*Config, []error) {
 			TargetAddr:         cfg.TargetAddr,
 			ForwardTrafficType: ftt,
 		}}
-	} else {
-		var errs []error
-		for _, spec := range targetSpecs {
-			target, parseErrs := parseTargetMapping(spec)
-			if len(parseErrs) > 0 {
-				errs = append(errs, parseErrs...)
-				continue
-			}
-			cfg.Targets = append(cfg.Targets, target)
-		}
-		if len(errs) > 0 {
-			return nil, errs
-		}
 	}
 
 	return cfg, nil
