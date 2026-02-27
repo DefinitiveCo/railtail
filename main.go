@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/half0wl/railtail/internal/config"
@@ -42,32 +43,48 @@ func main() {
 
 	defer ts.Close()
 
-	listenAddr := "[::]:" + cfg.ListenPort
-
 	logger.Stdout.Info("🚀 Starting railtail",
 		slog.String("ts-hostname", cfg.TSHostname),
-		slog.String("listen-addr", listenAddr),
-		slog.String("target-addr", cfg.TargetAddr),
 		slog.String("ts-login-server", cmp.Or(cfg.TSLoginServer, "using_default")),
 		slog.String("ts-state-dir", filepath.Join(cfg.TSStateDirPath, "railtail")),
+		slog.Int("targets", len(cfg.Targets)),
 	)
+
+	httpClient := ts.HTTPClient()
+	httpClient.Transport.(*http.Transport).TLSClientConfig = &tls.Config{
+		InsecureSkipVerify: true,
+	}
+
+	var wg sync.WaitGroup
+
+	for _, target := range cfg.Targets {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runTarget(target, ts, httpClient)
+		}()
+	}
+
+	wg.Wait()
+}
+
+func runTarget(target config.Target, ts *tsnet.Server, httpClient *http.Client) {
+	listenAddr := "[::]:" + target.ListenPort
 
 	listener, err := net.Listen("tcp", listenAddr)
 	if err != nil {
-		logger.StderrWithSource.Error("failed to start local listener", logger.ErrAttr(err))
+		logger.StderrWithSource.Error("failed to start local listener",
+			logger.ErrAttr(err),
+			slog.String("listen-addr", listenAddr),
+		)
 		os.Exit(1)
 	}
 
-	if cfg.ForwardTrafficType == config.ForwardTrafficTypeHTTP || cfg.ForwardTrafficType == config.ForwardTrafficTypeHTTPS {
-		logger.Stdout.Info("running in HTTP/s proxy mode (http(s):// scheme detected in targetAddr)",
+	if target.ForwardTrafficType == config.ForwardTrafficTypeHTTP || target.ForwardTrafficType == config.ForwardTrafficTypeHTTPS {
+		logger.Stdout.Info("starting HTTP/s proxy",
 			slog.String("listen-addr", listenAddr),
-			slog.String("target-addr", cfg.TargetAddr),
+			slog.String("target-addr", target.TargetAddr),
 		)
-
-		httpClient := ts.HTTPClient()
-		httpClient.Transport.(*http.Transport).TLSClientConfig = &tls.Config{
-			InsecureSkipVerify: true,
-		}
 
 		server := http.Server{
 			IdleTimeout:       60 * time.Second,
@@ -75,12 +92,12 @@ func main() {
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				forwardingInfo := []any{
 					slog.String("remote-addr", r.RemoteAddr),
-					slog.String("target", cfg.TargetAddr),
+					slog.String("target", target.TargetAddr),
 				}
 
 				logger.Stdout.Info("forwarding", forwardingInfo...)
 
-				if err := fwdHttp(httpClient, cfg.TargetAddr, w, r); err != nil {
+				if err := fwdHttp(httpClient, target.TargetAddr, w, r); err != nil {
 					logger.StderrWithSource.Error("failed to forward http request", append([]any{logger.ErrAttr(err)}, forwardingInfo...)...)
 				}
 			}),
@@ -90,11 +107,13 @@ func main() {
 			logger.StderrWithSource.Error("failed to start http server", logger.ErrAttr(err))
 			os.Exit(1)
 		}
+
+		return
 	}
 
-	logger.Stdout.Info("running in TCP tunnel mode (no HTTP scheme detected in targetAddr)",
+	logger.Stdout.Info("starting TCP tunnel",
 		slog.String("listen-addr", listenAddr),
-		slog.String("target-addr", cfg.TargetAddr),
+		slog.String("target-addr", target.TargetAddr),
 	)
 
 	for {
@@ -107,13 +126,13 @@ func main() {
 		forwardingInfo := []any{
 			slog.String("local-addr", conn.LocalAddr().String()),
 			slog.String("remote-addr", conn.RemoteAddr().String()),
-			slog.String("target", cfg.TargetAddr),
+			slog.String("target", target.TargetAddr),
 		}
 
 		logger.Stdout.Info("forwarding tcp connection", forwardingInfo...)
 
 		go func() {
-			if err := fwdTCP(conn, ts, cfg.TargetAddr); err != nil {
+			if err := fwdTCP(conn, ts, target.TargetAddr); err != nil {
 				logger.StderrWithSource.Error("forwarding failed", append([]any{logger.ErrAttr(err)}, forwardingInfo...)...)
 			}
 		}()
